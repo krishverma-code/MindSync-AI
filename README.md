@@ -41,7 +41,7 @@ To register this server in your Antigravity config (`~/.gemini/config/config.jso
   "mcpServers": {
     "mindsync": {
       "command": "node",
-      "args": ["/Users/krishverma/Desktop/MindSyncAI/MindSync-AI/mcp_server.js"],
+      "args": ["/Users/krishverma/Desktop/MindSync-AI/mcp_server.js"],
       "env": {
         "PORT": "3000",
         "API_SECRET": "mindsync_secret_passphrase_2026"
@@ -49,6 +49,37 @@ To register this server in your Antigravity config (`~/.gemini/config/config.jso
     }
   }
 }
+```
+
+---
+
+## 🏗️ System Architecture & Multi-Agent Orchestration
+
+MindSync AI utilizes a shared-state architecture centered around a synchronized JSON database (`db.json`) protected by a reentrant transaction queue lock (`runAtomic`).
+
+```mermaid
+graph TD
+    User([User UI / Client]) <--> API[HTTP Router & Middleware]
+    API <--> Queue[runAtomic Queue Lock]
+    Queue <--> DB[(db.json Storage)]
+    
+    subgraph Autonomous Background Agents
+        Ingestion[Ingestion Agent]
+        Clipper[Web Clipper Agent]
+        Conflict[Conflict Detector Agent]
+        Sprout[Concept Sprout Engine]
+        Voice[Voice Refiner Agent]
+        Chat[Chat Agent - RAG]
+        Action[Action Runner Agent]
+    end
+    
+    DB <--> Ingestion
+    Clipper --> Ingestion
+    Ingestion --> Conflict
+    Sprout <--> DB
+    Voice --> DB
+    Chat <--> DB
+    Action <--> DB
 ```
 
 ---
@@ -63,29 +94,30 @@ MindSync AI coordinates 7 autonomous sub-agents working together on a shared dat
 4. **Concept Sprout Engine (Brainstormer):** Selects topically distant notes and synthesizes them to formulate innovative research ideas, blog concepts, or project proposals.
 5. **Brain Dump Refiner Agent (Voice Restructurer):** Captures microphone input via browser Web Speech APIs and refines messy transcriptions into formatted markdown notes.
 6. **Chat Agent (RAG Conversationalist):** Answers user questions by executing tools (`search_notes`, `clip_url`, `list_tasks`, `list_conflicts`, `list_sprouts`) and summarizes findings with citations.
-7. **Action Runner Agent (Webhook Integrator):** Triggers webhook updates, exports notes to markdown, or compiles daily briefing briefing digests.
+7. **Action Runner Agent (Webhook Integrator):** Triggers webhook updates, exports notes to markdown, or compiles daily briefing digests.
 
 ---
 
 ## 🎨 Frontend Design (9 Panels View)
 
-- **Panel 1: Dashboard Overview:** Morning briefing, statistics cards, and canvas growth charts.
+- **Panel 1: Dashboard Overview:** Daily briefing card, statistics cards, and canvas growth charts.
 - **Panel 2: Notes Library:** Filter and manage notes. Features semantic search toggles and web article clipping.
 - **Panel 3: Knowledge Graph:** Interactive canvas simulation rendering notes as glowing nodes linked by semantic similarity.
-- **Panel 4: Agent Chat:** Conversational chat interface featuring an collapsible execution log trace panel.
+- **Panel 4: Agent Chat:** Conversational chat interface featuring a collapsible execution log trace panel.
 - **Panel 5: Task Board:** Kanban task board (To Do, In Progress, Done) with HTML5 drag-and-drop.
 - **Panel 6: Conflict Center:** Resolve contradiction alerts flagged by the Conflict Detector.
 - **Panel 7: Concept Sprouts:** Create or grow cross-disciplinary idea sprouts into full notes.
-- **Panel 8: Voice Recorder:** Pulsing recording microphone to dictate notes via browser Speech Recognition.
+- **Panel 8: Voice Recorder:** Dictate notes via browser Speech Recognition.
 - **Panel 9: Action Runner:** Run custom webhooks or markdown folder exports.
 
 ---
 
-## 🛡️ Security Features
+## 🛡️ Security & Engineering Features
 
+- **Reentrant Transaction Queue (`runAtomic`):** Protects the database file from concurrency write collisions. Built using standard `AsyncLocalStorage` to serialize updates without blocking synchronous sub-agent calls.
 - **Bearer Token Auth:** API secret is validated via standard `Authorization` headers for all endpoint routes.
-- **Rate Limiting:** Protects endpoints from browser-level denial-of-service attempts by restricting clients to 120 req/min.
-- **XSS Sanitization:** Note titles and content are sanitized of HTML tags and script elements.
+- **Rate Limiting & GC Loop:** Limits clients to 120 req/min, with an active background garbage collection loop to remove expired client records and prevent memory leaks.
+- **XSS Mitigation & Data Safety:** Notes are stored raw in the database to prevent losing XML, HTML, or code formatting, and securely escaped on the client-side during DOM rendering.
 - **Prompt Injection Defense:** User inputs are wrapped in strict delimiters inside system prompts to enforce safety limits.
 - **Isolation:** Environment credentials are kept out of exports, git, and log files.
 
@@ -98,6 +130,6 @@ MindSync AI coordinates 7 autonomous sub-agents working together on a shared dat
 | **Agent / Multi-agent system** | ✅ | Code — 7 specialized agents with orchestration, tool-use, delegation, and shared state |
 | **MCP Server** | ✅ | Code — `mcp_server.js` exposing 6 tools via JSON-RPC stdio protocol |
 | **Antigravity** | ✅ | Video — Built & run entirely inside Antigravity using `agy-node` |
-| **Security features** | ✅ | Code — API auth, input sanitization, rate limiting, prompt injection guard |
+| **Security features** | ✅ | Code — API auth, rate limiting, data-safe XSS escaping, prompt injection guard |
 | **Deployability** | ✅ | Video — Zero-dependency, single-command launch, no npm/pip needed |
 | **Agent skills** | ✅ | Code — Antigravity skill (`SKILL.md`) for MindSync integration |
