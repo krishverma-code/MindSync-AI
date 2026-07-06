@@ -30,6 +30,28 @@ const PORT = process.env.PORT || 3000;
 const API_SECRET = process.env.API_SECRET || 'mindsync_secret_passphrase_2026';
 const DB_FILE = path.join(__dirname, 'db.json');
 
+const { AsyncLocalStorage } = require('async_hooks');
+const dbStorage = new AsyncLocalStorage();
+let dbQueuePromise = Promise.resolve();
+
+async function runAtomic(fn) {
+  if (dbStorage.getStore()) {
+    return fn();
+  }
+  return new Promise((resolve, reject) => {
+    dbQueuePromise = dbQueuePromise.then(() => {
+      return dbStorage.run(true, async () => {
+        try {
+          const res = await fn();
+          resolve(res);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+  });
+}
+
 // --- DATABASE UTILITIES ---
 async function readDB() {
   try {
@@ -67,6 +89,16 @@ function isRateLimited(ip) {
   rateLimits[ip].count++;
   return rateLimits[ip].count > 120; // Allow 120 requests/minute
 }
+
+// Clean up expired rate limiting entries every minute to prevent memory leak
+setInterval(() => {
+  const now = Date.now();
+  for (const ip in rateLimits) {
+    if (now > rateLimits[ip].resetTime) {
+      delete rateLimits[ip];
+    }
+  }
+}, 60000);
 
 function sanitizeInput(str) {
   if (typeof str !== 'string') return '';
@@ -410,17 +442,17 @@ The field of computer security has evolved significantly since the 1960s, progre
     }
   }
 
-  // Register Extracted Tasks
+  // Register Extracted Tasks (Standardized to sourceNote)
   if (result.actionItems && result.actionItems.length > 0) {
     for (const itemText of result.actionItems) {
-      const exists = db.tasks.some(t => t.noteId === note.id && t.title === itemText);
+      const exists = db.tasks.some(t => t.sourceNote === note.id && t.title === itemText);
       if (!exists) {
         db.tasks.push({
           id: 'task-' + crypto.randomBytes(4).toString('hex'),
           title: itemText,
           status: 'todo',
           priority: itemText.toLowerCase().includes('urgent') || itemText.toLowerCase().includes('important') ? 'high' : 'medium',
-          noteId: note.id,
+          sourceNote: note.id,
           createdAt: new Date().toISOString()
         });
       }
@@ -458,15 +490,27 @@ function fetchURL(urlString) {
   });
 }
 
+function decodeHTMLEntities(text) {
+  if (!text) return '';
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ');
+}
+
 function cleanHTML(html) {
   let title = 'Clipped Article';
   const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  if (titleMatch) title = titleMatch[1].trim();
+  if (titleMatch) title = decodeHTMLEntities(titleMatch[1].trim());
 
   let description = '';
   const descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i) ||
                     html.match(/<meta[^>]*content=["']([^"']*)["'][^>]*name=["']description["']/i);
-  if (descMatch) description = descMatch[1].trim();
+  if (descMatch) description = decodeHTMLEntities(descMatch[1].trim());
 
   let bodyText = html
     .replace(/<script[^>]*>([\S\s]*?)<\/script>/gi, '')
@@ -483,7 +527,7 @@ function cleanHTML(html) {
     bodyText = bodyText.substring(0, 5000) + '... (truncated)';
   }
 
-  return { title, description, content: bodyText };
+  return { title, description, content: decodeHTMLEntities(bodyText) };
 }
 
 async function runWebClipperAgent(url) {
@@ -977,14 +1021,14 @@ The assignment reinforces best practices in database design, such as specifying 
     }
   }
 
-  // Register Extracted Tasks
+  // Register Extracted Tasks (Standardized to sourceNote)
   if (result.actionItems && result.actionItems.length > 0) {
     for (const itemText of result.actionItems) {
-      const exists = db.tasks.some(t => t.noteId === newNote.id && t.title === itemText);
+      const exists = db.tasks.some(t => t.sourceNote === newNote.id && t.title === itemText);
       if (!exists) {
         db.tasks.push({
           id: 'task-' + crypto.randomBytes(4).toString('hex'),
-          noteId: newNote.id,
+          sourceNote: newNote.id,
           title: itemText,
           status: 'todo',
           createdAt: new Date().toISOString()
@@ -2034,8 +2078,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   // API Endpoints routing
-  try {
-    const db = await readDB();
+  return runAtomic(async () => {
+    try {
+      const db = await readDB();
 
     if (pathname === '/api/notes' && req.method === 'GET') {
       const filtered = db.notes.filter(n => !n.id.startsWith('note-digest-') && !n.title.startsWith('Daily Digest'));
@@ -2061,8 +2106,8 @@ const server = http.createServer(async (req, res) => {
       }
       const newNote = {
         id: 'note-' + crypto.randomBytes(4).toString('hex'),
-        title: sanitizeInput(body.title),
-        content: sanitizeInput(body.content),
+        title: body.title,
+        content: body.content,
         createdAt: new Date().toISOString()
       };
       db.notes.push(newNote);
@@ -2127,8 +2172,8 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       const body = await getRequestBody(req);
-      if (body.title) note.title = sanitizeInput(body.title);
-      if (body.content) note.content = sanitizeInput(body.content);
+      if (body.title) note.title = body.title;
+      if (body.content) note.content = body.content;
       
       await writeDB(db);
       
@@ -2277,8 +2322,8 @@ const server = http.createServer(async (req, res) => {
           } else if (tool === 'create_note') {
             const newN = {
               id: 'note-' + crypto.randomBytes(4).toString('hex'),
-              title: sanitizeInput(args.title),
-              content: sanitizeInput(args.content),
+              title: args.title,
+              content: args.content,
               createdAt: new Date().toISOString()
             };
             db.notes.push(newN);
@@ -2474,6 +2519,9 @@ const server = http.createServer(async (req, res) => {
           // Push new note to database
           db.notes.push(mergedNote);
           
+          // Write DB to disk first so runIngestionAgent can read it
+          await writeDB(db);
+          
           // Ingest new note to trigger auto-linking and check for any new conflicts
           await runIngestionAgent(mergedNote.id);
           
@@ -2526,10 +2574,8 @@ const server = http.createServer(async (req, res) => {
       // Build the new note
       const newNote = {
         id: 'note-' + crypto.randomBytes(4).toString('hex'),
-        title: sanitizeInput(sprout.title),
-        content: sanitizeInput(
-          `### Concept Origin\n\nThis note was sprouted by cross-pollinating two ideas from your knowledge base.\n\n### Synthesized Idea\n\n${sprout.description}\n\n### Source Notes\n\n- ${sourceTitles[0] || 'Source A'}\n- ${sourceTitles[1] || 'Source B'}\n\n### Next Steps\n\nExpand on this concept by exploring connections, running experiments, or drafting an outline.`
-        ),
+        title: sprout.title,
+        content: `### Concept Origin\n\nThis note was sprouted by cross-pollinating two ideas from your knowledge base.\n\n### Synthesized Idea\n\n${sprout.description}\n\n### Source Notes\n\n- ${sourceTitles[0] || 'Source A'}\n- ${sourceTitles[1] || 'Source B'}\n\n### Next Steps\n\nExpand on this concept by exploring connections, running experiments, or drafting an outline.`,
         createdAt: new Date().toISOString()
       };
 
@@ -2679,11 +2725,12 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Endpoint not found.' }));
 
-  } catch (err) {
-    console.error('API Error:', err);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Internal Server Error: ' + err.message }));
-  }
+    } catch (err) {
+      console.error('API Error:', err);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal Server Error: ' + err.message }));
+    }
+  });
 });
 
 async function runGlobalConflictScanner() {
@@ -2828,13 +2875,13 @@ async function initServer() {
     await writeDB(db);
   }
 
-  await migrateDatabaseLinks();
-  await runGlobalConflictScanner().catch(console.error);
+  await runAtomic(() => migrateDatabaseLinks());
+  await runAtomic(() => runGlobalConflictScanner()).catch(console.error);
 
   // Background conflict scanner loop (runs every 30 seconds)
   setInterval(async () => {
     try {
-      await runGlobalConflictScanner();
+      await runAtomic(() => runGlobalConflictScanner());
     } catch (err) {
       console.error('[Background Scanner] Conflict scan failed:', err.message);
     }

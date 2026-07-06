@@ -26,7 +26,11 @@ function loadEnv() {
 loadEnv();
 
 const PORT = process.env.PORT || 3000;
-const API_SECRET = process.env.API_SECRET || 'mindsync_secret_passphrase_2026';
+const API_SECRET = process.env.API_SECRET;
+if (!API_SECRET) {
+  console.error("Fatal Error: The API_SECRET environment variable is not configured. Please define it in your environment or .env file before starting the MCP server.");
+  process.exit(1);
+}
 
 const rl = readline.createInterface({
   input: process.stdin,
