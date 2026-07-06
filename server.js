@@ -30,6 +30,28 @@ const PORT = process.env.PORT || 3000;
 const API_SECRET = process.env.API_SECRET || 'mindsync_secret_passphrase_2026';
 const DB_FILE = path.join(__dirname, 'db.json');
 
+const { AsyncLocalStorage } = require('async_hooks');
+const dbStorage = new AsyncLocalStorage();
+let dbQueuePromise = Promise.resolve();
+
+async function runAtomic(fn) {
+  if (dbStorage.getStore()) {
+    return fn();
+  }
+  return new Promise((resolve, reject) => {
+    dbQueuePromise = dbQueuePromise.then(() => {
+      return dbStorage.run(true, async () => {
+        try {
+          const res = await fn();
+          resolve(res);
+        } catch (err) {
+          reject(err);
+        }
+      });
+    });
+  });
+}
+
 // --- DATABASE UTILITIES ---
 async function readDB() {
   try {
@@ -410,17 +432,17 @@ The field of computer security has evolved significantly since the 1960s, progre
     }
   }
 
-  // Register Extracted Tasks
+  // Register Extracted Tasks (Standardized to sourceNote)
   if (result.actionItems && result.actionItems.length > 0) {
     for (const itemText of result.actionItems) {
-      const exists = db.tasks.some(t => t.noteId === note.id && t.title === itemText);
+      const exists = db.tasks.some(t => t.sourceNote === note.id && t.title === itemText);
       if (!exists) {
         db.tasks.push({
           id: 'task-' + crypto.randomBytes(4).toString('hex'),
           title: itemText,
           status: 'todo',
           priority: itemText.toLowerCase().includes('urgent') || itemText.toLowerCase().includes('important') ? 'high' : 'medium',
-          noteId: note.id,
+          sourceNote: note.id,
           createdAt: new Date().toISOString()
         });
       }
@@ -458,15 +480,27 @@ function fetchURL(urlString) {
   });
 }
 
+function decodeHTMLEntities(text) {
+  if (!text) return '';
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ');
+}
+
 function cleanHTML(html) {
   let title = 'Clipped Article';
   const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-  if (titleMatch) title = titleMatch[1].trim();
+  if (titleMatch) title = decodeHTMLEntities(titleMatch[1].trim());
 
   let description = '';
   const descMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']*)["']/i) ||
                     html.match(/<meta[^>]*content=["']([^"']*)["'][^>]*name=["']description["']/i);
-  if (descMatch) description = descMatch[1].trim();
+  if (descMatch) description = decodeHTMLEntities(descMatch[1].trim());
 
   let bodyText = html
     .replace(/<script[^>]*>([\S\s]*?)<\/script>/gi, '')
@@ -483,7 +517,7 @@ function cleanHTML(html) {
     bodyText = bodyText.substring(0, 5000) + '... (truncated)';
   }
 
-  return { title, description, content: bodyText };
+  return { title, description, content: decodeHTMLEntities(bodyText) };
 }
 
 async function runWebClipperAgent(url) {
@@ -977,14 +1011,14 @@ The assignment reinforces best practices in database design, such as specifying 
     }
   }
 
-  // Register Extracted Tasks
+  // Register Extracted Tasks (Standardized to sourceNote)
   if (result.actionItems && result.actionItems.length > 0) {
     for (const itemText of result.actionItems) {
-      const exists = db.tasks.some(t => t.noteId === newNote.id && t.title === itemText);
+      const exists = db.tasks.some(t => t.sourceNote === newNote.id && t.title === itemText);
       if (!exists) {
         db.tasks.push({
           id: 'task-' + crypto.randomBytes(4).toString('hex'),
-          noteId: newNote.id,
+          sourceNote: newNote.id,
           title: itemText,
           status: 'todo',
           createdAt: new Date().toISOString()
@@ -2034,8 +2068,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   // API Endpoints routing
-  try {
-    const db = await readDB();
+  return runAtomic(async () => {
+    try {
+      const db = await readDB();
 
     if (pathname === '/api/notes' && req.method === 'GET') {
       const filtered = db.notes.filter(n => !n.id.startsWith('note-digest-') && !n.title.startsWith('Daily Digest'));
@@ -2474,6 +2509,9 @@ const server = http.createServer(async (req, res) => {
           // Push new note to database
           db.notes.push(mergedNote);
           
+          // Write DB to disk first so runIngestionAgent can read it
+          await writeDB(db);
+          
           // Ingest new note to trigger auto-linking and check for any new conflicts
           await runIngestionAgent(mergedNote.id);
           
@@ -2679,11 +2717,12 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Endpoint not found.' }));
 
-  } catch (err) {
-    console.error('API Error:', err);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Internal Server Error: ' + err.message }));
-  }
+    } catch (err) {
+      console.error('API Error:', err);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Internal Server Error: ' + err.message }));
+    }
+  });
 });
 
 async function runGlobalConflictScanner() {
@@ -2828,13 +2867,13 @@ async function initServer() {
     await writeDB(db);
   }
 
-  await migrateDatabaseLinks();
-  await runGlobalConflictScanner().catch(console.error);
+  await runAtomic(() => migrateDatabaseLinks());
+  await runAtomic(() => runGlobalConflictScanner()).catch(console.error);
 
   // Background conflict scanner loop (runs every 30 seconds)
   setInterval(async () => {
     try {
-      await runGlobalConflictScanner();
+      await runAtomic(() => runGlobalConflictScanner());
     } catch (err) {
       console.error('[Background Scanner] Conflict scan failed:', err.message);
     }
